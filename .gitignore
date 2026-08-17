@@ -1,0 +1,55 @@
+# Oracle Cloud Ampere A1 Instance Creator - Git Ignore
+
+# Sensitive credentials and keys
+*.pem
+*_key*
+*key*.pem
+*-credentials*.txt
+agent-credentials.txt
+credentials*.txt
+secrets*.txt
+
+# OCI Config
+.oci/
+config
+*.config
+
+# Instance details (contains OCIDs, IPs)
+instance_details.json
+
+# Dashboard state
+dashboard_status.json
+
+# Logs
+*.log
+ampere_a1_creation.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Hermes specific
+.hermes/
+.agents/
+.claude/
+skills-lock.json
+IDEA.md
