@@ -12,7 +12,7 @@ import sys
 import time
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 import oci
@@ -35,34 +35,11 @@ AVAILABILITY_DOMAIN = None  # None = try all ADs in order, or specify specific A
 # Ubuntu 22.04 image
 UBUNTU_22_04_IMAGE_NAME = "Canonical Ubuntu 22.04"
 
-# SSH key for INSTANCE ACCESS (different from API signing key)
-SSH_PRIVATE_KEY_PEM = """-----BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEA5q4UENZvOToiH9oAYvzAaBAUW1N51JDb/PFzRr+aaq93++Rf
-GV2bto9gjNPcCZSkCdBSoXan0RcSsgxhb2Knvf2PQHnsOE59rnu0WwM4UbkIEJkx
-Nr5zGRWBELf47XfPhd3fvbXJZKyG2pU2NYVXW41d2XRk+3PRxgz8l9LMthqoui3p
-TbPekqQmUrOxvhmo5ir4MFM3I52pPtFxw6OV3xISB/OEyBS5dHHtnDa5WZs3Qrqh
-mVDzysh1pMFdALYqL58PMu2c1BLJMYdBAde3dejekPhXZ6vb0EWg271ON2O1NA5J
-JXkEw6V6Nz9JRQCyhtb9OvsbE72uYjiqvYmnBQIDAQABAoIBAANYkQ5X3emJlocg
-JWAW/gxEXdc5R1iC+JeBqEQyPhSM32oPu1iZCzIps2/RGHoqTGE43In4OG6Hx1ik
-mO4BrO2ZKPCTFCisH5Yq6y6XksPBfrfaHcs6fF1OLfITiRCaUhZ4ZZw3b87+ONjt
-nLyuZqb7gcBh6zkOfZ0Ozfck/2nz9mLUd+NzYZY8LM5FuvYYImeGI0tQirgGC181
-pC3B324uuqTkRtRlCg6LUY6Iw8UWjbV9MHSEKb19Qg1/1jfWns6Awu9rs6IMBVCr
-wsx2iZRNPKwRzic3HH5+idAHzdQJaQ0sJnEniJvl1Bj7UoeDzMcRby8caEEsIfpM
-kptTFsECgYEA+0P7QQpyko/v+H1CQ/J9oVJ9mPinFWZ10+Wsl9OEmUwSNGdrIRC9
-tULV3uY9rXtmhnTMnYba4yM1nEIBL2xfI+5n/0ZWG+8/7njW4ABb0kJgz+CU2RKx
-iYheDq8i7JxoCmGjdSlobDv3KF4GYf71082txbUKNUI72MWcinMK/JUCgYEA6wbM
-nPlJGLsUTzbyvUmClK0dc4JCgH07mfqrLuBvBuaMYZSLDMQIT99e88QoyvOb8UOk
-kJ7Dcpz2qy9KIzfL/29h3wYBDliOTMYUbvMDPGQpzuOkqKky2IASk7DTnpCT2pnc
-9H0DkkYRiEyIXzYeZYSyjDT9nj4zlpYNXeGn9LECgYEA8XwynB34Y1em4IEyEK+b
-glIPl9dSbcTddVuFdx24kMSFsou6cDrwuKaVefZ6TKMOtCbJCJS1BhuuyJC/Jt7W
-yWe116e31n0oSn8ktIBjvz5AYUmMhNvseSvwidhUjmb7rw6L1GyJiYxQTCGhrMkn
-ZfqFCkCmoO0ZK4swmfdbFckCgYAqxMP7VMnefDzH5YHqvDPNBmuzl2Kuqxtre9gm
-4aSSpuWo5DUhj5LLpiRLS8j4lbgtAVgzEREUDEg/Ao4FNqQiyYwP37HVgHv0sJ8L
-SaGvHbMV+Qr/vjqId1XqFmWMF1cwkotI2m8J8UJDgVnXqauCYdFz/jig0UTmBExO
-Zz//IQKBgFNPPcZQhLq3dNfLCPcwm4ujFO5nc0jUGHzlsjuJdvJJIuIBHPAaDyST
-PIXrjhEarTIBHkYkQlSYH1eeVWog/87HFfSgseFsfHQ5ocgR8cqSVfoeHo7SX0Gk
-dNpfKTfa3nRBH6yeTaSdtTICUY9gmHzmSvfjoECW1rW6+Q+21adB
------END RSA PRIVATE KEY-----"""
+# SSH PRIVATE KEY for INSTANCE ACCESS (different from the OCI API signing key).
+# NEVER hardcode a private key here. The key is loaded from an external file:
+# set the SSH_PRIVATE_KEY_FILE environment variable, or place your key at the
+# default path below. Only the PUBLIC key derived from it is sent to OCI.
+SSH_PRIVATE_KEY_FILE = os.environ.get("SSH_PRIVATE_KEY_FILE", "~/.ssh/id_rsa")
 
 # Rate limiting configuration
 INITIAL_DELAY_SECONDS = 2      # Start with 2s between attempts
@@ -75,7 +52,10 @@ JITTER_FACTOR = 0.2            # ±20% jitter to avoid thundering herd
 MAX_RUNTIME_SECONDS = None  # e.g., 3600 for 1 hour max
 
 # Dashboard integration
-DASHBOARD_STATUS_FILE = "C:/Users/wielk/Downloads/takss/dashboard_status.json"
+DASHBOARD_STATUS_FILE = os.environ.get(
+    "DASHBOARD_STATUS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_status.json")
+)
 
 # Logging
 LOG_LEVEL = logging.INFO
@@ -351,12 +331,18 @@ def get_or_create_security_list(network_client, compartment_id: str, vcn_id: str
 
 
 def get_ssh_public_key() -> str:
-    """Extract public key from private key in OpenSSH format."""
+    """Load the SSH private key from file and derive its public key."""
     from cryptography.hazmat.primitives import serialization
-    private_key = serialization.load_pem_private_key(
-        SSH_PRIVATE_KEY_PEM.encode(),
-        password=None
-    )
+
+    key_path = os.path.expanduser(SSH_PRIVATE_KEY_FILE)
+    if not os.path.isfile(key_path):
+        raise FileNotFoundError(
+            f"SSH private key not found at '{key_path}'. "
+            "Set the SSH_PRIVATE_KEY_FILE environment variable or place your "
+            "key at the default path."
+        )
+    with open(key_path, "rb") as f:
+        private_key = serialization.load_pem_private_key(f.read(), password=None)
     public_key = private_key.public_key()
     public_key_openssh = public_key.public_bytes(
         encoding=serialization.Encoding.OpenSSH,
@@ -431,13 +417,13 @@ def create_instance(compute_client, compartment_id: str, availability_domain: st
     return instance
 
 
-def get_instance_public_ip(network_client, instance_id: str, compartment_id: str) -> Optional[str]:
-    """Get the public IP of the instance."""
-    try:
-        # Get VNIC attachments
-        config = oci.config.from_file(OCI_CONFIG_FILE, OCI_PROFILE)
-        compute_client = oci.core.ComputeClient(config)
+def get_instance_ips(network_client, compute_client, instance_id: str,
+                     compartment_id: str) -> tuple:
+    """Get (public_ip, private_ip) from the instance's VNIC attachments.
 
+    OCI Instance objects don't carry IPs directly - they live on the VNIC.
+    """
+    try:
         response = oci.pagination.list_call_get_all_results(
             compute_client.list_vnic_attachments,
             compartment_id=compartment_id,
@@ -446,11 +432,11 @@ def get_instance_public_ip(network_client, instance_id: str, compartment_id: str
 
         for attachment in response.data:
             vnic = network_client.get_vnic(attachment.vnic_id).data
-            if vnic.public_ip:
-                return vnic.public_ip
+            if vnic.public_ip or vnic.private_ip:
+                return vnic.public_ip, vnic.private_ip
     except Exception as e:
-        logger.warning(f"Could not get public IP: {e}")
-    return None
+        logger.warning(f"Could not get instance IPs: {e}")
+    return None, None
 
 
 # ============================================================
@@ -521,27 +507,22 @@ def run_with_rate_limit_handling(attempt_func, *args, ad_num: int = None, attemp
 
 
 def main():
-    logger.info("=" * 60)
-    logger.info("Oracle Cloud Ampere A1 Instance Creator")
-    logger.info(f"Target: {OCPU_COUNT} OCPU, {MEMORY_IN_GBS} GB RAM, {BOOT_VOLUME_SIZE_IN_GBS} GB")
-    logger.info(f"Region: eu-frankfurt-1")
-    logger.info(f"Image: Ubuntu 22.04")
-    if MAX_RUNTIME_SECONDS:
-        logger.info(f"Max runtime: {MAX_RUNTIME_SECONDS}s")
-    logger.info("=" * 60)
-
-    # Initialize dashboard
-    update_dashboard(script_running=True, status="trying", message="Starting script...", current_ad="N/A", total_attempts=0)
-    log_dashboard("info", "Script started", ad_num=0, attempt_num=0)
-
     start_time = time.time()
 
     # Setup OCI clients
     compute_client, network_client, blockstorage_client, identity_client, config = create_oci_clients()
     compartment_id = config["tenancy"]  # Use tenancy as compartment (root)
 
-    logger.info("OCI clients initialized")
-    log_dashboard("info", "OCI clients initialized", ad_num=0, attempt_num=0)
+    logger.info("=" * 60)
+    logger.info("Oracle Cloud Ampere A1 Instance Creator")
+    logger.info(f"Target: {OCPU_COUNT} OCPU, {MEMORY_IN_GBS} GB RAM, {BOOT_VOLUME_SIZE_IN_GBS} GB")
+    logger.info(f"Region: {config.get('region', 'unknown')}")
+    logger.info(f"Image: Ubuntu 22.04")
+    if MAX_RUNTIME_SECONDS:
+        logger.info(f"Max runtime: {MAX_RUNTIME_SECONDS}s")
+    logger.info("=" * 60)
+
+    log_dashboard("info", "Script started", ad_num=0, attempt_num=0)
 
     # Get availability domains
     ads = run_with_rate_limit_handling(get_availability_domains, identity_client, compartment_id)
@@ -610,8 +591,10 @@ def main():
                 ad_num=ad_index+1, attempt_num=attempt_counter
             )
 
-            # Get public IP
-            public_ip = get_instance_public_ip(network_client, instance.id, compartment_id)
+            # Get IPs from VNIC attachments (Instance objects don't carry them)
+            public_ip, private_ip = get_instance_ips(
+                network_client, compute_client, instance.id, compartment_id
+            )
 
             # Success summary
             logger.info("=" * 60)
@@ -622,9 +605,9 @@ def main():
             logger.info(f"Shape: {instance.shape} ({instance.shape_config.ocpus} OCPU, {instance.shape_config.memory_in_gbs} GB)")
             logger.info(f"Availability Domain: {instance.availability_domain}")
             logger.info(f"State: {instance.lifecycle_state}")
-            logger.info(f"Private IP: {instance.private_ip}")
+            logger.info(f"Private IP: {private_ip or 'Not yet assigned'}")
             logger.info(f"Public IP: {public_ip or 'Not yet assigned'}")
-            logger.info(f"SSH Command: ssh -i <your-key> ubuntu@{public_ip or instance.public_ip}")
+            logger.info(f"SSH Command: ssh -i <your-key> ubuntu@{public_ip or private_ip or '<pending>'}")
             logger.info(f"Total time: {time.time() - start_time:.1f}s")
             logger.info("=" * 60)
 
@@ -633,14 +616,14 @@ def main():
                 "instance_id": instance.id,
                 "instance_name": instance.display_name,
                 "public_ip": public_ip,
-                "private_ip": instance.private_ip,
+                "private_ip": private_ip,
                 "shape": instance.shape,
                 "ocpus": instance.shape_config.ocpus if instance.shape_config else OCPU_COUNT,
                 "memory_gb": instance.shape_config.memory_in_gbs if instance.shape_config else MEMORY_IN_GBS,
                 "availability_domain": instance.availability_domain,
-                "region": "eu-frankfurt-1",
+                "region": config.get("region", "unknown"),
                 "ssh_user": "ubuntu",
-                "created_at": datetime.utcnow().isoformat() + "Z"
+                "created_at": datetime.now(timezone.utc).isoformat()
             }
 
             with open("instance_details.json", "w") as f:

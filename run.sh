@@ -33,10 +33,11 @@ if [ ! -f ~/.oci/config ]; then
     echo "Or copy oci_config.example to ~/.oci/config and fill in your credentials."
 fi
 
-# Check for SSH key in script
-if grep -q "<YOUR_SSH_PRIVATE_KEY>" create_ampere_a1.py; then
-    echo "Warning: SSH_PRIVATE_KEY_PEM not configured in create_ampere_a1.py"
-    echo "Please edit create_ampere_a1.py and add your SSH private key."
+# Check for SSH private key file
+SSH_KEY_FILE="${SSH_PRIVATE_KEY_FILE:-$HOME/.ssh/id_rsa}"
+if [ ! -f "$SSH_KEY_FILE" ]; then
+    echo "Warning: SSH private key not found at $SSH_KEY_FILE"
+    echo "Set SSH_PRIVATE_KEY_FILE or place your key there."
 fi
 
 echo ""

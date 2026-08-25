@@ -33,11 +33,11 @@ if not exist "%USERPROFILE%\.oci\config" (
     echo Or copy oci_config.example to %%USERPROFILE%%\.oci\config and fill in your credentials.
 )
 
-REM Check for SSH key in script
-findstr /C:"<YOUR_SSH_PRIVATE_KEY>" create_ampere_a1.py >nul
-if not errorlevel 1 (
-    echo Warning: SSH_PRIVATE_KEY_PEM not configured in create_ampere_a1.py
-    echo Please edit create_ampere_a1.py and add your SSH private key.
+REM Check for SSH private key file
+if not defined SSH_PRIVATE_KEY_FILE set SSH_PRIVATE_KEY_FILE=%USERPROFILE%\.ssh\id_rsa
+if not exist "%SSH_PRIVATE_KEY_FILE%" (
+    echo Warning: SSH private key not found at %SSH_PRIVATE_KEY_FILE%
+    echo Set SSH_PRIVATE_KEY_FILE or place your key there.
 )
 
 echo.

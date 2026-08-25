@@ -1,227 +1,150 @@
 # Oracle Cloud Ampere A1 Instance Creator
 
-An automated script to provision **Ampere A1 Flex** instances (4 OCPU, 24 GB RAM, 50 GB boot volume) on Oracle Cloud Infrastructure with Ubuntu 22.04. Features rate-limit-aware exponential backoff, multi-availability domain failover, and a real-time web dashboard.
+An autonomous instance-launcher for Oracle Cloud Infrastructure (OCI) Free Tier that keeps retrying until it wins the capacity lottery. Ampere A1 instances are famously hard to grab in popular regions — this tool handles the hammering for you, politely: rate-limit-aware exponential backoff, automatic failover across availability domains, and a live dashboard so you can watch the attempts.
 
-## 🏗️ Architecture
+**Target configuration:** `VM.Standard.A1.Flex` · 4 OCPU · 24 GB RAM · 50 GB boot volume · Ubuntu 22.04
+
+## Features
+
+- **Persistent retry loop** — up to 100 attempts per operation with exponential backoff (2 s → 60 s cap) and ±20 % jitter, so Oracle's rate limiter doesn't flag you as an abuser
+- **Multi-AD failover** — automatically iterates through all availability domains in your region when one reports *Out of host capacity*
+- **Zero-touch networking** — creates (or reuses) the VCN, subnet, and security list (`ampere-a1-*`) with SSH-only ingress; everything is idempotent, so re-runs don't duplicate resources
+- **Live dashboard** — single-file Flask app showing status, attempt counter, current AD, runtime, recent log entries, and full instance details on success
+- **Latest image detection** — picks the newest Ubuntu 22.04 image compatible with the A1 shape at launch time
+- **No secrets in source** — OCI credentials come from the standard `~/.oci/config`; the instance SSH key is loaded from a file on disk, never pasted into code
+
+## Repository layout
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Oracle Cloud Infrastructure                      │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐      │
-│  │  AD-1 (Frankfurt)│  │  AD-2 (Frankfurt)│  │  AD-3 (Frankfurt)│      │
-│  │  VM.Standard.A1  │  │  VM.Standard.A1  │  │  VM.Standard.A1  │      │
-│  │  Flex 4C/24GB    │  │  Flex 4C/24GB    │  │  Flex 4C/24GB    │      │
-│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘      │
-│           │                     │                     │                │
-│           └─────────────────────┼─────────────────────┘                │
-│                                 ▼                                      │
-│                    ┌──────────────────────┐                            │
-│                    │   VCN: ampere-a1-vcn │                            │
-│                    │   CIDR: 10.0.0.0/16  │                            │
-│                    │   ┌────────────────┐ │                            │
-│                    │   │ Subnet: 10.0.1 │ │                            │
-│                    │   │ /24 per AD     │ │                            │
-│                    │   └────────────────┘ │                            │
-│                    │   Security List:   │                            │
-│                    │   SSH (22) + ICMP  │                            │
-│                    └──────────────────────┘                            │
-└─────────────────────────────────────────────────────────────────────────┘
-                                  ▲
-                                  │ OCI SDK (REST API)
-                                  │
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           Local Machine                                  │
-│  ┌──────────────────┐    ┌──────────────────┐                          │
-│  │ create_ampere_a1 │    │   dashboard.py   │                          │
-│  │     .py          │    │   (Flask)        │                          │
-│  │                  │    │                  │                          │
-│  │ • Rate limiting  │    │ • Port 5050     │                          │
-│  │ • Exponential    │    │ • Auto-refresh  │                          │
-│  │   backoff        │    │   (2s)          │                          │
-│  │ • Multi-AD       │    │ • Logs with     │                          │
-│  │   failover       │    │   timestamps,   │                          │
-│  │ • Auto networking│    │   AD, attempt # │                          │
-│  └────────┬─────────┘    └────────┬────────┘                          │
-│           │                       │                                    │
-│           └───────────────────────┘                                    │
-│                    JSON status file                                    │
-│           (dashboard_status.json)                                      │
-└─────────────────────────────────────────────────────────────────────────┘
+├── create_ampere_a1.py   # Main script: launch loop, backoff, AD failover
+├── dashboard.py          # Single-file Flask dashboard (HTML/JS inline)
+├── oci_config.example    # Template for ~/.oci/config
+├── requirements.txt      # oci, cryptography, flask
+├── run.sh / run.bat      # One-command startup (venv + deps + both processes)
+└── .gitignore            # Keeps credentials, logs, and state files out of git
 ```
 
-## ✨ Features
+## Requirements
 
-- **Automatic provisioning**: Creates Ampere A1 Flex instances with 4 OCPU, 24 GB RAM, 50 GB boot volume
-- **Ubuntu 22.04**: Automatically finds latest compatible image
-- **Smart networking**: Auto-creates/reuses VCN, subnet, security list (SSH + ICMP)
-- **Multi-AD failover**: Tries AD-1 → AD-2 → AD-3 until capacity available
-- **Rate-limit handling**: Exponential backoff (2s → 60s max) with jitter
-- **Real-time dashboard**: Flask web UI at `http://localhost:5050` with live logs
-- **Detailed logging**: Every attempt tagged with timestamp, AD number, and attempt number
-- **Clean shutdown**: Saves instance details to `instance_details.json` on success
+- Python 3.8+
+- An [OCI account](https://www.oracle.com/cloud/free/) (Free Tier works)
+- OCI API signing key configured via `oci setup config` (or manually — see below)
+- An RSA SSH private key on disk (only the derived **public** key is sent to OCI)
 
-## 📋 Prerequisites
+## Quick start
 
-1. **Oracle Cloud Account** with access to Frankfurt region (`eu-frankfurt-1`)
-2. **OCI API Signing Key** configured (see [OCI Setup](#oci-setup))
-3. **Python 3.8+** with `pip`
-4. **SSH Key Pair** for instance access
+### 1. Configure OCI credentials
 
-## 🔧 OCI Setup
-
-### 1. Generate API Signing Key
+The script reads the standard OCI config file — API signing keys only, nothing embedded in the repo:
 
 ```bash
-# Generate RSA key pair
-openssl genrsa -out oci_api_key.pem 2048
-openssl rsa -pubout -in oci_api_key.pem -out oci_api_key_public.pem
+# Option A: official CLI helper
+pip install oci-cli
+oci setup config
+
+# Option B: manual
+mkdir -p ~/.oci && cp oci_config.example ~/.oci/config
+# then fill in user OCID, tenancy OCID, fingerprint, region, and key_file path
+chmod 600 ~/.oci/config
 ```
 
-### 2. Upload Public Key to OCI Console
+### 2. Point the script at your SSH private key
 
-1. Open OCI Console → **User menu** → **My Profile** → **API Keys**
-2. Click **"Add Public Key"**
-3. Paste contents of `oci_api_key_public.pem`
-4. Copy the **fingerprint** shown (format: `aa:bb:cc:...`)
-
-### 3. Create OCI Config File
-
-Copy `oci_config.example` to `~/.oci/config` and fill in:
-
-```ini
-[DEFAULT]
-user=ocid1.user.oc1..<YOUR_USER_OCID>
-fingerprint=<YOUR_API_KEY_FINGERPRINT>
-tenancy=ocid1.tenancy.oc1..<YOUR_TENANCY_OCID>
-region=eu-frankfurt-1
-key_file=~/.oci/oci_api_key.pem
-```
-
-### 4. Set Private Key Permissions
+By default it uses `~/.ssh/id_rsa`. To use a different key:
 
 ```bash
-chmod 600 ~/.oci/oci_api_key.pem
+export SSH_PRIVATE_KEY_FILE=/path/to/your_private_key   # Linux/macOS
+set SSH_PRIVATE_KEY_FILE=C:\path\to\key.pem             # Windows (cmd)
 ```
 
-## 🚀 Installation
+> ⚠️ **Never paste a private key into the source code or commit it.**
+> If a private key ever lands in a git repo — even briefly — treat it as
+> compromised: remove it from history **and** rotate/delete the key pair.
+
+### 3. Launch everything
 
 ```bash
-# Clone repository
-git clone <your-repo-url>
-cd oracle-ampere-a1-creator
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## ⚙️ Configuration
-
-Edit `create_ampere_a1.py` to customize:
-
-```python
-# Instance configuration
-INSTANCE_SHAPE = "VM.Standard.A1.Flex"
-OCPU_COUNT = 4
-MEMORY_IN_GBS = 24
-BOOT_VOLUME_SIZE_IN_GBS = 50
-AVAILABILITY_DOMAIN = None  # None = try all ADs, or specify specific AD
-
-# SSH key for INSTANCE ACCESS (different from API signing key)
-SSH_PRIVATE_KEY_PEM = """-----BEGIN RSA PRIVATE KEY-----
-<YOUR_SSH_PRIVATE_KEY>
------END RSA PRIVATE KEY-----"""
-
-# Rate limiting
-INITIAL_DELAY_SECONDS = 2
-MAX_DELAY_SECONDS = 60
-MAX_RETRIES = 100
-BACKOFF_MULTIPLIER = 1.5
-JITTER_FACTOR = 0.2
-
-# Max runtime (None = unlimited)
-MAX_RUNTIME_SECONDS = None
-```
-
-## 🏃 Running
-
-### Option 1: Run both script and dashboard (recommended)
-
-```bash
-# Terminal 1: Start dashboard
-python dashboard.py
-
-# Terminal 2: Start instance creator
-python create_ampere_a1.py
-```
-
-Then open **http://localhost:5050** in your browser.
-
-### Option 2: Run script only
-
-```bash
-python create_ampere_a1.py
-```
-
-### Option 3: One-command startup (Linux/macOS)
-
-```bash
-chmod +x run.sh
+# Linux/macOS — creates venv, installs deps, starts dashboard + creator
 ./run.sh
-```
 
-### Option 4: One-command startup (Windows)
-
-```bat
+# Windows
 run.bat
 ```
 
-## 📊 Dashboard
+Or manually:
 
-The dashboard at `http://localhost:5050` shows:
+```bash
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 
-- **Status badge**: Trying (blue) / Success (green) / Failed (red)
-- **Current availability domain** being attempted
-- **Total launch attempts** counter
-- **Runtime** elapsed
-- **Real-time logs** with timestamp, AD number, and attempt number
-- **Instance details** on success (name, OCID, IPs, SSH command)
-
-Logs format:
-```
-[HH:MM:SS] [AD1] [#3] Server error (500): Out of host capacity., waiting 4.5s...
-[HH:MM:SS] [AD1] [#2] Launching instance in gNkw:EU-FRANKFURT-1-AD-1...
-[HH:MM:SS] [N/A] OCI clients initialized
+python dashboard.py &           # dashboard → http://localhost:5050
+python create_ampere_a1.py
 ```
 
-## 📁 Output Files
+Then open **http://localhost:5050** and watch the hunt.
 
-| File | Description |
-|------|-------------|
-| `instance_details.json` | Created on success: instance OCID, IPs, shape, SSH command |
-| `ampere_a1_creation.log` | Detailed log file |
-| `dashboard_status.json` | Real-time status for dashboard |
+## Configuration
 
-## 🔒 Security
+Edit the constants at the top of `create_ampere_a1.py`:
 
-- **No secrets in code**: All credentials via `~/.oci/config`
-- **API key separate from SSH key**: Different keys for API signing vs instance access
-- **Private keys never committed**: Added to `.gitignore`
-- **Example config provided**: `oci_config.example` shows format without real values
+| Constant | Default | Description |
+|---|---|---|
+| `OCPU_COUNT` | `4` | OCPUs for the A1 Flex shape |
+| `MEMORY_IN_GBS` | `24` | RAM in GB |
+| `BOOT_VOLUME_SIZE_IN_GBS` | `50` | Boot volume size |
+| `AVAILABILITY_DOMAIN` | `None` | Pin to one AD, or `None` to cycle through all |
+| `MAX_RETRIES` | `100` | Retry attempts per operation |
+| `INITIAL_DELAY_SECONDS` | `2` | First backoff delay |
+| `MAX_DELAY_SECONDS` | `60` | Backoff ceiling |
+| `OCI_PROFILE` | `DEFAULT` | Profile inside `~/.oci/config` |
 
-## 🐛 Troubleshooting
+Environment variables:
 
-| Error | Solution |
-|-------|----------|
-| `InvalidKey` / 401 | API signing key not uploaded to OCI Console, or fingerprint mismatch |
-| `Out of host capacity` (500) | Normal - script retries with backoff and tries other ADs |
-| `Rate limited` (429) | Script handles automatically with exponential backoff |
-| `No Ubuntu 22.04 image found` | Check region supports Ampere A1 with Ubuntu 22.04 |
-| Dashboard not updating | Ensure `dashboard.py` is running on port 5050 |
+| Variable | Default | Description |
+|---|---|---|
+| `SSH_PRIVATE_KEY_FILE` | `~/.ssh/id_rsa` | Private key used to derive the instance's authorized key |
+| `DASHBOARD_STATUS_FILE` | `<repo>/dashboard_status.json` | Shared state file between creator and dashboard |
 
-## 📝 License
+## How the retry engine works
 
-MIT License - feel free to use and modify.
+```
+for each availability domain in region:
+    ensure VCN / subnet / security list exist
+    try launch_instance:
+        ✓ success → fetch public IP, save instance_details.json, stop
+        ✗ 429 rate limit     → backoff (delay × 1.5, capped 60 s, ±20 % jitter) → retry
+        ✗ 5xx server error   → same backoff → retry
+        ✗ "Out of host capacity" → move to next AD immediately
+        after MAX_RETRIES exhausted              → next AD
+after all ADs → status=failed, exit non-zero
+```
 
-## ⚠️ Disclaimer
+On success the script writes `instance_details.json` (git-ignored) containing the instance OCID, IPs, shape, AD, and region, and the dashboard switches to the details view with a ready-made `ssh ubuntu@<ip>` command.
 
-This script makes API calls to Oracle Cloud. You are responsible for any charges incurred. The "Out of host capacity" errors are normal when capacity is unavailable - the script handles them gracefully.
+## Dashboard
+
+- Bound to **127.0.0.1:5050 only** — it has no authentication, so it never listens on external interfaces. For remote access use an SSH tunnel: `ssh -L 5050:localhost:5050 user@host`
+- Polls `/api/state` every 2 seconds; state flows from the creator via `dashboard_status.json`
+- Shows status badge, attempt count, current AD, runtime, last 50 log entries (timestamped with AD and attempt numbers), and instance details on success
+
+## Security notes
+
+- All OCI credentials live in `~/.oci/config` (API signing key) — nothing sensitive is read from the repo
+- The instance SSH private key stays on your disk; only the derived public key is transmitted to OCI
+- The dashboard binds to localhost and renders all dynamic data HTML-escaped (no XSS path from API data into the page)
+- `.gitignore` blocks credentials (`*.pem`, `*-credentials*.txt`, `config`), logs, `instance_details.json`, and `dashboard_status.json`
+
+## Troubleshooting
+
+| Symptom | Meaning |
+|---|---|
+| `Out of host capacity` repeatedly | Normal — Free Tier A1 is heavily oversubscribed. The whole point of this tool is to outlast it. |
+| Frequent `429` warnings | Expected under sustained retries; backoff grows automatically. |
+| `SSH_PRIVATE_KEY_FILE not found` | Set the env var or place a key at `~/.ssh/id_rsa`. |
+| `Failed to list availability domains` | Check `~/.oci/config` — wrong OCID/fingerprint, or the API key was rotated. |
+| Dashboard empty | Start `dashboard.py` before or together with the creator; they share `dashboard_status.json`. |
+
+## Disclaimer
+
+Automated instance launching must respect Oracle's [Terms of Use](https://www.oracle.com/cloud/free/) and fair-use policies. This tool backs off aggressively when rate-limited and only creates resources in your own tenancy. You are responsible for the resources created in your account — remember that idle Always Free A1 instances may be subject to reclamation.

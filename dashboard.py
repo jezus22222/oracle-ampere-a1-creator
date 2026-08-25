@@ -6,7 +6,10 @@ import threading
 
 app = Flask(__name__)
 
-STATUS_FILE = "C:/Users/wielk/Downloads/takss/dashboard_status.json"
+STATUS_FILE = os.environ.get(
+    "DASHBOARD_STATUS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_status.json")
+)
 
 # Shared state
 state = {
@@ -252,15 +255,17 @@ HTML_TEMPLATE = """
             if (data.status === 'success' && data.instance_details) {
                 instanceCard.style.display = 'block';
                 const inst = data.instance_details;
-                document.getElementById('instanceInfo').innerHTML = `
-                    <div class="instance-row"><span class="instance-label">Name</span><span class="instance-value">${inst.instance_name}</span></div>
-                    <div class="instance-row"><span class="instance-label">OCID</span><span class="instance-value">${inst.instance_id}</span></div>
-                    <div class="instance-row"><span class="instance-label">Shape</span><span class="instance-value">${inst.shape} (${inst.ocpus} OCPU, ${inst.memory_gb} GB)</span></div>
-                    <div class="instance-row"><span class="instance-label">AD</span><span class="instance-value">${inst.availability_domain}</span></div>
-                    <div class="instance-row"><span class="instance-label">Public IP</span><span class="instance-value">${inst.public_ip || 'Pending...'}</span></div>
-                    <div class="instance-row"><span class="instance-label">Private IP</span><span class="instance-value">${inst.private_ip}</span></div>
-                    <div class="instance-row"><span class="instance-label">SSH</span><span class="instance-value">ssh -i <key> ubuntu@${inst.public_ip || inst.private_ip}</span></div>
-                `;
+                // All values escaped - never inject API/instance data as raw HTML
+                const row = (label, value) =>
+                    `<div class="instance-row"><span class="instance-label">${escapeHtml(label)}</span><span class="instance-value">${escapeHtml(value)}</span></div>`;
+                document.getElementById('instanceInfo').innerHTML =
+                    row('Name', inst.instance_name) +
+                    row('OCID', inst.instance_id) +
+                    row('Shape', `${inst.shape} (${inst.ocpus} OCPU, ${inst.memory_gb} GB)`) +
+                    row('AD', inst.availability_domain) +
+                    row('Public IP', inst.public_ip || 'Pending...') +
+                    row('Private IP', inst.private_ip || 'Pending...') +
+                    row('SSH', `ssh -i <key> ubuntu@${inst.public_ip || inst.private_ip}`);
             }
         }
 
@@ -309,5 +314,8 @@ def format_duration(seconds):
         return f"{h}h {m}m"
 
 if __name__ == '__main__':
+    # Bind to localhost only: this dashboard has no authentication and must
+    # not be reachable from other machines. Use an SSH tunnel if remote
+    # access is needed: ssh -L 5050:localhost:5050 user@host
     print("Starting dashboard on http://localhost:5050")
-    app.run(host='0.0.0.0', port=5050, debug=False, threaded=True)
+    app.run(host='127.0.0.1', port=5050, debug=False, threaded=True)
