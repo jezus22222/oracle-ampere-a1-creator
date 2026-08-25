@@ -57,6 +57,9 @@ DASHBOARD_STATUS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_status.json")
 )
 
+# Instance details written on success (git-ignored)
+INSTANCE_DETAILS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance_details.json")
+
 # Logging
 LOG_LEVEL = logging.INFO
 LOG_FILE = "ampere_a1_creation.log"
@@ -507,6 +510,10 @@ def run_with_rate_limit_handling(attempt_func, *args, ad_num: int = None, attemp
 
 
 def main():
+    # Initialize dashboard first so it reflects activity immediately,
+    # even while OCI clients are still being created.
+    update_dashboard(script_running=True, status="trying", message="Starting script...", current_ad="N/A", total_attempts=0)
+
     start_time = time.time()
 
     # Setup OCI clients
@@ -626,9 +633,9 @@ def main():
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
 
-            with open("instance_details.json", "w") as f:
+            with open(INSTANCE_DETAILS_FILE, "w") as f:
                 json.dump(output, f, indent=2)
-            logger.info("Instance details saved to instance_details.json")
+            logger.info(f"Instance details saved to {INSTANCE_DETAILS_FILE}")
 
             # Update dashboard with success
             update_dashboard(
