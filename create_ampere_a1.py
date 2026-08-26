@@ -51,6 +51,12 @@ JITTER_FACTOR = 0.2            # ±20% jitter to avoid thundering herd
 # Maximum total runtime in seconds (None = no limit)
 MAX_RUNTIME_SECONDS = None  # e.g., 3600 for 1 hour max
 
+# Hunt mode: when ALL availability domains are exhausted, sleep and start
+# a fresh round instead of exiting. Stays off for permanent errors
+# (bad credentials, missing keys) so a broken setup can't loop forever.
+HUNT_FOREVER = True
+RESTART_DELAY_SECONDS = 300  # Cool-down between full rounds
+
 # Dashboard integration
 DASHBOARD_STATUS_FILE = os.environ.get(
     "DASHBOARD_STATUS_FILE",
@@ -669,16 +675,44 @@ def main():
     raise Exception(f"Failed to create instance in all {len(ad_list)} availability domains")
 
 
+def _is_permanent_error(e: Exception) -> bool:
+    """Errors that a restart cannot fix: auth, permissions, missing config."""
+    if isinstance(e, ServiceError) and e.status in (401, 403, 404):
+        return True
+    if isinstance(e, FileNotFoundError):
+        return True
+    msg = str(e).lower()
+    return "not authenticated" in msg or "authorization" in msg
+
+
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("\nInterrupted by user")
-        update_dashboard(status="failed", message="Interrupted by user", script_running=False)
-        log_dashboard("error", "Interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        update_dashboard(status="failed", message=f"Fatal error: {e}", script_running=False)
-        log_dashboard("error", f"Fatal error: {e}")
-        sys.exit(1)
+    round_num = 0
+    while True:
+        round_num += 1
+        try:
+            main()
+            break  # instance created - done
+        except KeyboardInterrupt:
+            logger.info("\nInterrupted by user")
+            update_dashboard(status="failed", message="Interrupted by user", script_running=False)
+            log_dashboard("error", "Interrupted by user")
+            sys.exit(1)
+        except Exception as e:
+            if _is_permanent_error(e):
+                logger.error(f"Fatal (permanent) error: {e}")
+                update_dashboard(status="failed", message=f"Fatal error: {e}", script_running=False)
+                log_dashboard("error", f"Fatal error: {e}")
+                sys.exit(1)
+            logger.error(f"Round {round_num} ended: {e}")
+            if not HUNT_FOREVER:
+                update_dashboard(status="failed", message=f"Failed: {e}", script_running=False)
+                sys.exit(1)
+            logger.info(f"Hunt mode: restarting in {RESTART_DELAY_SECONDS}s (round {round_num + 1})...")
+            update_dashboard(
+                status="trying",
+                message=f"All ADs exhausted (round {round_num}) - next round in {RESTART_DELAY_SECONDS // 60} min",
+                script_running=True
+            )
+            log_dashboard("warning", f"Round {round_num}: all ADs exhausted - restarting in {RESTART_DELAY_SECONDS}s")
+            time.sleep(RESTART_DELAY_SECONDS)
+            update_dashboard(status="trying", message=f"Starting round {round_num + 1}...", script_running=True)
