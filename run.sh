@@ -7,20 +7,29 @@ echo "=========================================="
 echo "Oracle Cloud Ampere A1 Instance Creator"
 echo "=========================================="
 
-# Check for Python
-if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 not found. Please install Python 3.8+"
+# Find Python (python3 on Unix, python on Windows/git-bash)
+PYTHON=python3
+command -v python3 &> /dev/null || PYTHON=python
+if ! command -v "$PYTHON" &> /dev/null; then
+    echo "Error: python/python3 not found. Please install Python 3.8+"
     exit 1
 fi
 
 # Check for virtual environment
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."
-    python3 -m venv venv
+    "$PYTHON" -m venv venv
 fi
 
-# Activate virtual environment
-source venv/bin/activate
+# Activate virtual environment (bin/ on Unix, Scripts/ on Windows)
+if [ -f venv/bin/activate ]; then
+    source venv/bin/activate
+elif [ -f venv/Scripts/activate ]; then
+    source venv/Scripts/activate
+else
+    echo "Error: venv activation script not found."
+    exit 1
+fi
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
