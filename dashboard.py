@@ -2,7 +2,6 @@ from flask import Flask, render_template_string, jsonify
 import json
 import os
 import time
-import threading
 
 app = Flask(__name__)
 
@@ -25,7 +24,6 @@ state = {
 }
 
 def load_state():
-    global state
     if os.path.exists(STATUS_FILE):
         try:
             with open(STATUS_FILE, 'r') as f:

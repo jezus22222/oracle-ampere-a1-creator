@@ -13,7 +13,7 @@ import time
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional
 
 import oci
 from oci.exceptions import ServiceError, RequestException
@@ -656,19 +656,19 @@ def main():
 
         except Exception as e:
             # Check if it's a capacity issue (500 with "Out of host capacity")
-            if isinstance(e, ServiceError) and e.status == 500 and "Out of host capacity" in str(e.message):
+            if isinstance(e, ServiceError) and getattr(e, "status", None) == 500 and "Out of host capacity" in str(getattr(e, "message", "")):
                 logger.warning(f"No capacity in {availability_domain}, trying next AD...")
                 log_dashboard("warning", f"No capacity in {availability_domain}, trying next AD...", ad_num=ad_index+1, attempt_num=attempt_counter)
                 continue
             # Check if it's a rate limit that we've exhausted
-            elif isinstance(e, Exception) and "Max retries" in str(e):
+            if isinstance(e, Exception) and "Max retries" in str(e):
                 logger.error(f"Exhausted retries in {availability_domain}, trying next AD...")
                 log_dashboard("error", f"Exhausted retries in {availability_domain}, trying next AD...", ad_num=ad_index+1, attempt_num=attempt_counter)
                 continue
-            else:
-                logger.error(f"Error in {availability_domain}: {e}")
-                log_dashboard("error", f"Error in {availability_domain}: {e}", ad_num=ad_index+1, attempt_num=attempt_counter)
-                raise
+
+            logger.error(f"Error in {availability_domain}: {e}")
+            log_dashboard("error", f"Error in {availability_domain}: {e}", ad_num=ad_index+1, attempt_num=attempt_counter)
+            raise
 
     update_dashboard(status="failed", message="Failed in all availability domains", script_running=False)
     log_dashboard("error", f"Failed to create instance in all {len(ad_list)} availability domains", ad_num=0, attempt_num=attempt_counter)
